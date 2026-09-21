@@ -31,4 +31,4 @@ Open Huzband Dashboard → My day with an HA administrator account and refresh t
 
 ## Evidence boundaries
 
-Package/bundle version 0.1.0. Dashboard API confirmed creation and stored-config verification. Git publication and CI results are recorded after the initial push. No task/calendar writes, Recorder changes or integration installation were performed.
+Package/bundle version 0.1.0. Implementation commit `f57cc2a` is published on main. GitHub Actions [Validate dashboard](https://github.com/Zensqrl/ha-personal-dashboard/actions/runs/35650480839) passed for that commit. Dashboard API confirmed creation and stored-config verification; unrelated Codex views were compared and preserved. The status view now links to the new dashboard. No task/calendar writes, Recorder changes or integration installation were performed.
