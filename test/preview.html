@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>Huzband Dashboard — synthetic preview</title
+  ><style>
+    body {
+      background: #101b25;
+      color: white;
+      font-family: system-ui;
+      margin: 0;
+      padding: 18px;
+    }
+    #controls {
+      max-width: 1000px;
+      margin: 0 auto 16px;
+      font-size: 12px;
+      color: #a6b6c5;
+    }
+    #controls button {
+      padding: 10px;
+      margin: 5px;
+    }
+    main {
+      max-width: 1050px;
+      margin: auto;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    main.phone {
+      max-width: 390px;
+      grid-template-columns: 1fr;
+    }
+    .wide {
+      grid-column: 1/-1;
+    }
+    .right {
+      display: grid;
+      align-content: start;
+      gap: 12px;
+    }
+    ha-icon {
+      display: inline-block;
+      width: 20px;
+      height: 20px;
+    }
+    ha-card {
+      display: block;
+    }
+    @media (max-width: 700px) {
+      main {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+  <div id="controls">
+    DEVELOPMENT FIXTURE — all values and tasks are synthetic.<button id="phone">
+      Phone width</button
+    ><button id="desktop">Desktop width</button
+    ><button id="failure">Toggle source failure</button>
+  </div>
+  <main class="phone">
+    <personal-day-brief class="wide"></personal-day-brief
+    ><personal-day-timeline></personal-day-timeline>
+    <div class="right">
+      <personal-suggested-actions></personal-suggested-actions
+      ><personal-signals></personal-signals>
+    </div>
+    <personal-navigation class="wide"></personal-navigation>
+  </main>
+  <script type="module">
+    import "/bundle.js";
+    customElements.define(
+      "ha-icon",
+      class extends HTMLElement {
+        connectedCallback() {
+          this.innerHTML =
+            '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg>';
+        }
+      },
+    );
+    const now = Date.now(),
+      zone = Intl.DateTimeFormat().resolvedOptions().timeZone,
+      day = new Intl.DateTimeFormat("en-CA", { timeZone: zone }).format(now),
+      connection = {};
+    const vals = {
+      body_battery: 82,
+      sleep_score: 85,
+      hrv_last_night_average: 55,
+      hrv_balanced_range_lower: 52,
+      hrv_balanced_range_upper: 60,
+      resting_heart_rate: 53,
+      steps: 6420,
+      daily_step_goal: 10000,
+      acute_training_load: 420,
+      chronic_training_load: 440,
+      training_load_ratio: 0.95,
+      training_readiness: 75,
+      recovery_time: 0,
+    };
+    const states = {};
+    for (const [key, value] of Object.entries(vals))
+      states["sensor.garmin_connect_" + key] = {
+        state: String(value),
+        attributes: {
+          data_provenance: {
+            outcome: "ok",
+            source_date: day,
+            fetched_at: new Date(now).toISOString(),
+          },
+        },
+      };
+    states["sensor.garmin_connect_body_battery_and_stress_timeline"] = {
+      attributes: {
+        calendar_date: day,
+        body_battery: Array.from({ length: 70 }, (_, i) => [
+          now - (70 - i) * 180000,
+          35 + Math.sin(i / 35) * 45,
+        ]),
+      },
+    };
+    states["weather.pirateweather"] = {
+      state: "sunny",
+      attributes: {
+        temperature: 74,
+        temperature_unit: "°F",
+        wind_speed_unit: "mph",
+      },
+    };
+    states["sun.sun"] = {
+      state: "above_horizon",
+      attributes: { next_setting: new Date(now + 5 * 3600000).toISOString() },
+    };
+    const tasks = [
+      {
+        id: "example-1",
+        content: "Update the home server",
+        priority: 4,
+        display_priority: 1,
+        labels: ["indoor", "focus"],
+        effective_duration: { amount: 45, unit: "minutes" },
+        due: { date: day },
+      },
+      {
+        id: "example-2",
+        content: "Organize garage shelving",
+        priority: 3,
+        display_priority: 2,
+        labels: ["indoor", "physical"],
+        effective_duration: { amount: 90, unit: "minutes" },
+      },
+      {
+        id: "example-3",
+        content: "Trim the shrubs",
+        priority: 2,
+        display_priority: 3,
+        labels: ["outdoor", "dry"],
+        effective_duration: { amount: 60, unit: "minutes" },
+      },
+    ];
+    let failed = false;
+    const hass = {
+      states,
+      connection,
+      config: { time_zone: zone },
+      user: { is_admin: true },
+      callWS: async (msg) => {
+        if (failed) throw Error("Fixture outage");
+        if (msg.type === "todoist_enhanced/tasks")
+          return {
+            contract_version: 1,
+            outcome: "success",
+            complete: true,
+            stale: false,
+            enrichment_complete: true,
+            metadata: { stale: false, complete: true, outcome: "success" },
+            tasks,
+          };
+        return {
+          response: {
+            "weather.pirateweather": {
+              forecast: Array.from({ length: 12 }, (_, i) => ({
+                datetime: new Date(
+                  Math.floor(now / 3600000) * 3600000 + i * 3600000,
+                ).toISOString(),
+                temperature: 74 - i,
+                precipitation_probability: i > 3 ? 65 : 0,
+                precipitation: i > 3 ? 0.05 : 0,
+                wind_speed: 6,
+                condition: "partlycloudy",
+              })),
+            },
+          },
+        };
+      },
+      callApi: async (method, path) => {
+        if (failed) throw Error("Fixture outage");
+        if (path.startsWith("calendars/"))
+          return [
+            {
+              summary: "Project catch-up",
+              start: new Date(now + 3600000).toISOString(),
+              end: new Date(now + 5400000).toISOString(),
+            },
+          ];
+        return {
+          status: "cached",
+          stale: false,
+          retrieved_at: new Date().toISOString(),
+          data: {
+            day,
+            nutrition: {
+              nutrients: {
+                calories: 1430,
+                protein: 103,
+                carbohydrates: 176,
+                fat: 54,
+              },
+              goals: {
+                calories: 2150,
+                protein: 150,
+                carbohydrates: 240,
+                fat: 68,
+              },
+            },
+          },
+        };
+      },
+    };
+    for (const card of document.querySelectorAll(
+      "main [class],main>personal-day-timeline,.right>*",
+    ))
+      if (card.setConfig) {
+        card.setConfig({
+          type: "custom:" + card.tagName.toLowerCase(),
+          calendar: "calendar.fixture",
+          nutrition_api: "mcp-example",
+          end_hour: 23,
+          start_hour: 0,
+        });
+        card.hass = hass;
+      }
+    document.querySelector("#phone").onclick = () =>
+      document.querySelector("main").classList.add("phone");
+    document.querySelector("#desktop").onclick = () =>
+      document.querySelector("main").classList.remove("phone");
+    document.querySelector("#failure").onclick = () => {
+      failed = !failed;
+      for (const card of document.querySelectorAll("main *"))
+        if (card.controller) {
+          card.controller.cache = {};
+          card.controller.poll(true);
+          break;
+        }
+    };
+  </script>
+</html>

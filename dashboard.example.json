@@ -1,0 +1,65 @@
+{
+  "views": [
+    {
+      "title": "My day",
+      "path": "my-day",
+      "icon": "mdi:calendar-heart",
+      "type": "sections",
+      "max_columns": 2,
+      "sections": [
+        {
+          "type": "grid",
+          "column_span": 2,
+          "cards": [
+            {
+              "type": "custom:personal-day-brief",
+              "calendar": "calendar.your_google_calendar",
+              "nutrition_api": "mcp-YOUR_API_ID",
+              "grid_options": { "columns": "full", "rows": "auto" }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "custom:personal-day-timeline",
+              "calendar": "calendar.your_google_calendar",
+              "nutrition_api": "mcp-YOUR_API_ID",
+              "grid_options": { "columns": "full", "rows": "auto" }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "cards": [
+            {
+              "type": "custom:personal-suggested-actions",
+              "calendar": "calendar.your_google_calendar",
+              "nutrition_api": "mcp-YOUR_API_ID",
+              "grid_options": { "columns": "full", "rows": "auto" }
+            },
+            {
+              "type": "custom:personal-signals",
+              "calendar": "calendar.your_google_calendar",
+              "nutrition_api": "mcp-YOUR_API_ID",
+              "grid_options": { "columns": "full", "rows": "auto" }
+            }
+          ]
+        },
+        {
+          "type": "grid",
+          "column_span": 2,
+          "cards": [
+            {
+              "type": "custom:personal-navigation",
+              "calendar": "calendar.your_google_calendar",
+              "nutrition_api": "mcp-YOUR_API_ID",
+              "grid_options": { "columns": "full", "rows": "auto" }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

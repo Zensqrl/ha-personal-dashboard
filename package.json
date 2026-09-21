@@ -1,0 +1,14 @@
+{
+  "name": "ha-personal-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build": "node scripts/build.mjs",
+    "preview": "node scripts/preview.mjs"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2"
+  }
+}
