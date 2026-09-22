@@ -39,6 +39,8 @@ Four card types share a controller per HA connection and configuration:
 
 HA state supplies Garmin readings and provenance. Supported forecast service calls supply hourly weather. Authenticated calendar REST reads use a local-day window. Todoist Enhanced supplies tasks and metadata freshness via WebSocket. Nutrition uses the same authenticated HA MCP route already accepted by the source project. Nothing calls an AI model or persists personal snapshots to localStorage.
 
+Diagrams of the pipeline, the recovery verdict and task ranking are in [docs/decision-flow.md](docs/decision-flow.md).
+
 The new view uses native Sections for the outer layout. Four tiles remain two-up on phones; larger screens put the timeline left and actions/signals right. Shared CSS inside our own shadow roots provides styling without `card-mod` or modifying existing cards. Details use native dialogs instead of adding a Bubble dependency to this package. Existing Bubble/ApexCharts cards remain available for later expanded details; neither is required by v0.1.
 
 ## Policy and configuration
@@ -53,9 +55,9 @@ The **Refresh** button checks data available through HA and reports progress, fa
 
 Garmin detail rows show the source day and flag fallback/retained readings. Fetch and device-sync times are not presented as measurement times. Nutrition shows **Data checked** age bands (>15 min, >30 min, >1 hr, >2 hr), separately from incomplete totals/targets and an older diary date. These bands describe `retrieved_at`, not the time food was eaten or edited.
 
-Recovery uses current Body Battery, sleep and HRV relative to Garmin bounds. Body Battery below 35, sleep below 60, HRV outside bounds, optional training readiness below 40 or positive recovery time favor easy movement. Missing, retained, failed, wrong-day or old inputs suppress a strong recommendation. RHR is displayed without an unsupported normal/abnormal claim. Load metrics are context, not a load-focus deficit diagnosis.
+Recovery uses current Body Battery, sleep and HRV relative to Garmin bounds ([diagram](docs/decision-flow.md#recovery-verdict)). Body Battery below 35, sleep below 60, HRV outside bounds, optional training readiness below 40 or positive recovery time favor easy movement. Missing, retained, failed, wrong-day or old inputs suppress a strong recommendation. RHR is displayed without an unsupported normal/abnormal claim. Load metrics are context, not a load-focus deficit diagnosis.
 
-Task ordering: overdue, then due today, then priority, then known time fit, with stable ID tie-breaking. No missing duration is treated as zero. Native/label duration inference is owned by Todoist Enhanced. Configure `labels` to map your exact task label names to `outdoor`, `indoor`, `dry`, `daylight`, `physical` or `focus`. Defaults include outdoor/outside, indoor/indoors, dry, daylight, physical/high-physical, focus/high-focus. Unspecified suitability is explicitly noted. High-focus labels are displayed as context; no unsupported cognitive readiness score is inferred.
+Task ordering ([diagram](docs/decision-flow.md#task-ranking-and-block-fit)): overdue, then due today, then priority, then known time fit, with stable ID tie-breaking. No missing duration is treated as zero. Native/label duration inference is owned by Todoist Enhanced. Configure `labels` to map your exact task label names to `outdoor`, `indoor`, `dry`, `daylight`, `physical` or `focus`. Defaults include outdoor/outside, indoor/indoors, dry, daylight, physical/high-physical, focus/high-focus. Unspecified suitability is explicitly noted. High-focus labels are displayed as context; no unsupported cognitive readiness score is inferred.
 
 Overlapping calendar events merge. Explicitly transparent/cancelled events do not block. An all-day event with unknown busy status or an invalid event time suspends free-block suggestions. Ambiguous/nonexistent DST wall times are rejected. A successful empty query means no recorded commitments, not unlimited availability. Suggestions are tentative and do not reserve time; each free block gets at most one task or activity. Opening a task only follows its Todoist link.
 
