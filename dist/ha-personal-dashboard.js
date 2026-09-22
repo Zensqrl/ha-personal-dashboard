@@ -1,10 +1,11 @@
-// Huzband Dashboard v0.1.0 — built from tracked source. No remote imports.
-const VERSION = "0.1.0";
+// Huzband Dashboard v0.1.1 — built from tracked source. No remote imports.
+const VERSION = "0.1.1";
 const DEFAULTS = Object.freeze({
   calendar: null,
   weather: "weather.pirateweather",
   start_hour: 8,
   end_hour: 21,
+  show_time_zone: false,
   rain_probability: 30,
   min_temp_c: 10,
   max_temp_c: 30,
@@ -135,6 +136,7 @@ function garmin(states, key, now, zone, cfg) {
     !!p &&
     ["ok", "success"].includes(p.latest_outcome ?? p.outcome) &&
     !p.retained &&
+    !p.fallback_used &&
     p.coordinator_available !== false &&
     p.source_date === dayKey(now, zone) &&
     age >= 0 &&
@@ -146,11 +148,16 @@ function garmin(states, key, now, zone, cfg) {
     fresh,
     sourceDate: p?.source_date,
     at: p?.fetched_at,
-    reason: !s
-      ? "Not available"
-      : !fresh
-        ? "Older or unverified observation"
-        : "Current source data",
+    reason:
+      !s || value === null
+        ? "Not available"
+        : p?.retained
+          ? "Retained reading"
+          : p?.fallback_used
+            ? "Fallback reading"
+            : !fresh
+              ? "Older or unverified reading"
+              : "",
   };
 }
 function recovery(g) {
@@ -263,10 +270,65 @@ function nutrition(data, day, now) {
     rows,
     date,
     at: data?.retrieved_at,
+    ageText: nutritionAge(data?.retrieved_at, now),
     fresh,
     complete: rows.every((r) => r.total !== null && r.target !== null),
     queued: !!data?.refresh_queued,
   };
+}
+function nutritionAge(at, now) {
+  const minutes = (now - Date.parse(at)) / 60000;
+  if (!Number.isFinite(minutes) || minutes < 0) return "Check time unknown";
+  if (minutes >= 120) return "Data checked >2 hr ago";
+  if (minutes >= 60) return "Data checked >1 hr ago";
+  if (minutes >= 30) return "Data checked >30 min ago";
+  if (minutes > 15) return "Data checked >15 min ago";
+  return "Data checked within 15 min";
+}
+function taskStatus(entry, now) {
+  if (!entry) return { code: "loading", text: "Loading Todoist tasks…" };
+  if (!entry.ok) {
+    const messages = {
+      timeout:
+        "Todoist task request timed out. Try Refresh. If this continues, check Todoist Enhanced in Home Assistant Settings → Devices & services.",
+      contract:
+        "Todoist Enhanced returned an unsupported response. Check its installed version in Home Assistant Settings → Devices & services.",
+      unavailable:
+        "Todoist Enhanced is unavailable. Check the integration in Home Assistant Settings → Devices & services.",
+      auth: "Task access was denied. Check your Home Assistant session and Todoist Enhanced integration status.",
+    };
+    return {
+      code: entry.error ?? "connection",
+      text:
+        messages[entry.error] ??
+        "Could not load Todoist tasks. Try Refresh. If this continues, check your Home Assistant connection and Todoist Enhanced integration status.",
+    };
+  }
+  if (!Number.isFinite(entry.at) || now < entry.at || now - entry.at >= 600000)
+    return {
+      code: "old",
+      text: "The last task check is over 10 minutes old or its time is unknown. Try Refresh to resume suggestions.",
+    };
+  const t = entry.data;
+  if (t?.stale || t?.metadata?.stale)
+    return {
+      code: "stale",
+      text: "Todoist Enhanced has older task or label data. Try Refresh; if it stays older, check the integration status in Home Assistant Settings → Devices & services.",
+    };
+  if (
+    t?.outcome !== "success" ||
+    t.complete !== true ||
+    t.enrichment_complete !== true ||
+    t.metadata?.complete !== true ||
+    t.metadata?.outcome !== "success" ||
+    t.stale !== false ||
+    t.metadata?.stale !== false
+  )
+    return {
+      code: "incomplete",
+      text: "Todoist task or label data is incomplete. Try Refresh; if it remains incomplete, check Todoist Enhanced in Home Assistant Settings → Devices & services.",
+    };
+  return { code: "ready", text: "Ready" };
 }
 function weatherWindow(
   forecasts,
@@ -468,7 +530,13 @@ function rankTasks(tasks, free, context) {
         b.score - a.score || String(a.task.id).localeCompare(String(b.task.id)),
     );
 }
-function buildModel(hass, cache, cfg, now = Date.now()) {
+function buildModel(
+  hass,
+  cache,
+  cfg,
+  now = Date.now(),
+  dismissed = new Set(),
+) {
   const zone = hass.config?.time_zone ?? "UTC",
     states = hass.states ?? {},
     b = bounds(now, zone, cfg),
@@ -500,16 +568,11 @@ function buildModel(hass, cache, cfg, now = Date.now()) {
       ? schedule(cache.calendar.data, start, b.to, zone)
       : { free: [], busy: [], allDay: [], uncertain: false };
   const te = cache.tasks?.data;
-  const taskOk =
-    cache.tasks?.ok &&
-    now - cache.tasks.at < 600000 &&
-    te?.outcome === "success" &&
-    te.complete === true &&
-    te.stale === false &&
-    te.enrichment_complete === true &&
-    te.metadata?.stale === false &&
-    te.metadata?.complete === true &&
-    te.metadata?.outcome === "success";
+  const taskState = taskStatus(cache.tasks, now);
+  const taskOk = taskState.code === "ready";
+  const eligibleTasks = (te?.tasks ?? []).filter(
+    (t) => !dismissed.has(String(t.id)),
+  );
   const forecast =
     cache.weather?.ok && now - cache.weather.at < 7200000
       ? cache.weather.data
@@ -520,7 +583,7 @@ function buildModel(hass, cache, cfg, now = Date.now()) {
     ? {}
     : (states[cfg.weather]?.attributes ?? {});
   const ranked = taskOk
-    ? rankTasks(te.tasks ?? [], sc.free, {
+    ? rankTasks(eligibleTasks, sc.free, {
         cfg,
         now,
         zone,
@@ -534,7 +597,7 @@ function buildModel(hass, cache, cfg, now = Date.now()) {
     used = new Set();
   for (const block of sc.free) {
     const candidates = taskOk
-      ? rankTasks(te.tasks ?? [], [block], {
+      ? rankTasks(eligibleTasks, [block], {
           cfg,
           now,
           zone,
@@ -607,6 +670,8 @@ function buildModel(hass, cache, cfg, now = Date.now()) {
     cal,
     sc,
     taskOk,
+    taskState,
+    dismissedCount: dismissed.size,
     ranked,
     assignments,
     training,
@@ -631,18 +696,44 @@ function buildModel(hass, cache, cfg, now = Date.now()) {
 }
 
 const controllers = new WeakMap();
+const sessions = new WeakMap();
+function sessionFor(hass) {
+  const connection = hass.connection ?? hass;
+  let users = sessions.get(connection);
+  if (!users) sessions.set(connection, (users = new Map()));
+  const user = hass.user?.id ?? "current";
+  if (!users.has(user))
+    users.set(user, {
+      day: null,
+      dismissed: new Set(),
+      undo: [],
+      controllers: new Set(),
+    });
+  return users.get(user);
+}
+function readError(error) {
+  const code = String(error?.code ?? "");
+  const message = String(error?.message ?? "");
+  if (/unauthorized|auth|forbidden/i.test(code)) return "auth";
+  if (/unknown_command|not_found/i.test(code)) return "unavailable";
+  if (message === "Invalid task response") return "contract";
+  if (message === "Timed out") return "timeout";
+  return "connection";
+}
 function getController(hass, config) {
   let map = controllers.get(hass.connection);
   if (!map) {
     map = new Map();
     controllers.set(hass.connection, map);
   }
-  const { type, grid_options, ...options } = config;
-  const key = JSON.stringify(
-    Object.fromEntries(
-      Object.entries(options).sort(([a], [b]) => a.localeCompare(b)),
-    ),
-  );
+  const { type, grid_options, show_time_zone, ...options } = config;
+  const key =
+    (hass.user?.id ?? "current") +
+    JSON.stringify(
+      Object.fromEntries(
+        Object.entries(options).sort(([a], [b]) => a.localeCompare(b)),
+      ),
+    );
   if (!map.has(key)) map.set(key, new Controller(hass, options));
   return map.get(key);
 }
@@ -658,12 +749,15 @@ class Controller {
     this.listeners = new Set();
     this.timer = null;
     this.busy = false;
+    this.refreshState = { kind: "idle", text: "" };
+    this.session = sessionFor(hass);
     this.refresh = () => this.poll();
     this.visibility = () => {
       if (!document.hidden) this.poll(true);
     };
   }
   subscribe(fn) {
+    this.session.controllers.add(this);
     this.listeners.add(fn);
     if (this.listeners.size === 1) {
       this.timer = setInterval(() => this.poll(), 60000);
@@ -674,6 +768,7 @@ class Controller {
     return () => {
       this.listeners.delete(fn);
       if (!this.listeners.size) {
+        this.session.controllers.delete(this);
         clearInterval(this.timer);
         document.removeEventListener("visibilitychange", this.visibility);
       }
@@ -681,6 +776,27 @@ class Controller {
   }
   emit() {
     for (const fn of this.listeners) fn();
+  }
+  dismissed(now = Date.now()) {
+    const day = dayKey(now, this.hass.config.time_zone);
+    if (this.session.day !== day) {
+      this.session.day = day;
+      this.session.dismissed.clear();
+      this.session.undo = [];
+    }
+    return this.session.dismissed;
+  }
+  dismiss(id) {
+    const set = this.dismissed();
+    if (!set.has(String(id))) {
+      set.add(String(id));
+      this.session.undo.push(String(id));
+    }
+    for (const c of this.session.controllers) c.emit();
+  }
+  undoDismiss() {
+    this.dismissed().delete(this.session.undo.pop());
+    for (const c of this.session.controllers) c.emit();
   }
   async read(key, fn, day) {
     let timer;
@@ -692,11 +808,19 @@ class Controller {
           timer.unref?.();
         }),
       ]);
-      this.cache[key] = { data, ok: true, at: Date.now(), day, failures: 0 };
-    } catch {
+      this.cache[key] = {
+        data,
+        ok: true,
+        at: Date.now(),
+        lastSuccessAt: Date.now(),
+        day,
+        failures: 0,
+      };
+    } catch (error) {
       this.cache[key] = {
         ...this.cache[key],
         ok: false,
+        error: readError(error),
         at: Date.now(),
         day,
         failures: (this.cache[key]?.failures ?? 0) + 1,
@@ -706,21 +830,46 @@ class Controller {
     }
   }
   async poll(force = false) {
-    if (this.busy || !this.listeners.size || document.hidden) return;
+    if (this.busy || !this.listeners.size || document.hidden) {
+      if (force) {
+        if (this.busy) this.manualRequested = true;
+        this.refreshState = {
+          kind: "waiting",
+          text: this.busy
+            ? "A data check is already running…"
+            : "Open the dashboard to check data.",
+        };
+        this.emit();
+      }
+      return;
+    }
     this.busy = true;
+    this.manualRequested = force;
+    if (force)
+      this.refreshState = {
+        kind: "checking",
+        text: "Checking dashboard data…",
+      };
+    this.emit();
     const now = Date.now(),
       zone = this.hass.config.time_zone,
       day = dayKey(now, zone),
       b = bounds(now, zone, this.cfg);
-    const needs = (key, ttl) =>
-      !this.cache[key] ||
-      this.cache[key].day !== day ||
-      now - this.cache[key].at >=
-        (this.cache[key].failures
-          ? Math.min(900000, 60000 * 2 ** (this.cache[key].failures - 1))
-          : force
-            ? 10000
-            : ttl);
+    const attempted = [],
+      skipped = [];
+    const needs = (key, ttl) => {
+      const ready =
+        !this.cache[key] ||
+        this.cache[key].day !== day ||
+        now - this.cache[key].at >=
+          (this.cache[key].failures
+            ? Math.min(900000, 60000 * 2 ** (this.cache[key].failures - 1))
+            : force
+              ? 10000
+              : ttl);
+      (ready ? attempted : skipped).push(key);
+      return ready;
+    };
     const jobs = [];
     if (needs("tasks", 300000))
       jobs.push(
@@ -817,6 +966,54 @@ class Controller {
       );
     await Promise.allSettled(jobs);
     this.busy = false;
+    if (this.manualRequested) {
+      const names = {
+        tasks: "Todoist tasks",
+        calendar: "calendar",
+        weather: "weather",
+        nutrition: "nutrition",
+      };
+      const failed = attempted.filter((key) => !this.cache[key]?.ok);
+      const waiting = skipped.filter((key) => this.cache[key]?.failures);
+      const attention = [];
+      if (
+        this.cache.tasks?.ok &&
+        taskStatus(this.cache.tasks, Date.now()).code !== "ready"
+      )
+        attention.push("Todoist data needs attention; see Suggested actions");
+      if (this.cache.nutrition?.ok) {
+        const n = nutrition(this.cache.nutrition.data, day, Date.now());
+        if (!n.fresh || !n.complete)
+          attention.push("nutrition is older or incomplete; see Nutrition");
+      }
+      this.refreshState = {
+        kind:
+          failed.length || waiting.length || attention.length
+            ? "partial"
+            : attempted.length
+              ? "success"
+              : "cooldown",
+        text: !attempted.length
+          ? waiting.length
+            ? "Retry waiting for " +
+              waiting.map((k) => names[k]).join(", ") +
+              ". Automatic retries continue."
+            : "Data was just checked. Wait 10 seconds before checking again."
+          : failed.length
+            ? "Could not check " +
+              failed.map((k) => names[k]).join(", ") +
+              ". Other data checks completed."
+            : "Dashboard data checked." +
+              (waiting.length
+                ? " Retry waiting for " +
+                  waiting.map((k) => names[k]).join(", ") +
+                  "."
+                : ""),
+      };
+      if (attention.length)
+        this.refreshState.text += " " + attention.join("; ") + ".";
+      this.manualRequested = false;
+    }
     this.emit();
   }
 }
@@ -834,11 +1031,46 @@ const fmt = (x) =>
     ? "—"
     : Number(x).toLocaleString(undefined, { maximumFractionDigits: 1 });
 const time = (t, m) =>
-  new Date(t).toLocaleTimeString(undefined, {
-    timeZone: m.zone,
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  new Date(t)
+    .toLocaleTimeString("en-US", {
+      timeZone: m.zone,
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    })
+    .replace(/\s/g, "")
+    .toLowerCase();
+const clock = (t, m) => `<span class="clocktime">${esc(time(t, m))}</span>`;
+const clockText = (text) =>
+  esc(text).replace(
+    /\b\d{1,2}:\d{2}(?:am|pm)\b/g,
+    '<span class="clocktime">$&</span>',
+  );
+const hourText = (h) => `${h % 12 || 12}:00${h < 12 ? "am" : "pm"}`;
+const diaryStatus = (m) =>
+  [
+    m.n.date === m.b.day
+      ? "Today's diary"
+      : m.n.date
+        ? `Diary for ${m.n.date}`
+        : "Diary date unknown",
+    m.n.ageText,
+    !m.n.complete ? "Incomplete totals or targets" : "",
+    !m.n.fresh ? "Latest diary not confirmed" : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+const garminNote = (g, m) =>
+  [
+    g.reason,
+    g.sourceDate === m.b.day
+      ? "Today's Garmin value"
+      : g.sourceDate
+        ? `Garmin value for ${g.sourceDate}`
+        : "Measurement date unknown",
+  ]
+    .filter(Boolean)
+    .join(" · ");
 const icon = (name, cls = "") =>
   `<ha-icon class="${cls}" icon="mdi:${name}" aria-hidden="true"></ha-icon>`;
 const pill = (text, tone = "") =>
@@ -847,7 +1079,7 @@ const CSS = `
 ha-card{display:block}ha-icon{display:inline-flex;width:var(--mdc-icon-size,20px);height:var(--mdc-icon-size,20px);vertical-align:middle}ha-icon svg{width:100%;height:100%}
 :host{display:block;color:#edf3f8;--ink:#edf3f8;--sub:#a7b7c8;--line:#304050;--teal:#77dfc0;--blue:#78b7ef;--amber:#efc477;font-family:var(--primary-font-family,system-ui,sans-serif)}
 *{box-sizing:border-box}ha-card{background:linear-gradient(135deg,#1c2a35,#18232e);border:1px solid #2d3b48;border-radius:17px;color:var(--ink);box-shadow:0 5px 16px #0002;overflow:hidden}a{color:var(--blue);text-decoration:none}button,summary,a{touch-action:manipulation}button{font:inherit;color:inherit;cursor:pointer}button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--teal);outline-offset:3px}button{border:0;background:none}button:disabled{opacity:.5;cursor:wait}h1,h2,h3,p{margin:0}h2{font-size:17px;line-height:1.3;display:flex;gap:9px;align-items:center}h3{font-size:15px}p{line-height:1.5}small,.sub{color:var(--sub);font-size:12px;line-height:1.5}.pad{padding:16px}.head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:14px}.head small{text-align:right}ha-icon{--mdc-icon-size:20px;color:var(--blue);flex-shrink:0}.orb{display:grid;place-items:center;width:43px;height:43px;border-radius:50%;background:#275345;color:var(--teal);flex-shrink:0}.orb ha-icon{--mdc-icon-size:27px;color:inherit}.orb.blue{background:#263f56;color:var(--blue)}.orb.amber{background:#4c402c;color:var(--amber)}.pill{display:inline-block;font-size:11px;line-height:1.4;border:1px solid #465768;border-radius:20px;padding:3px 8px;color:#bdcad5;white-space:normal}.teal{color:var(--teal)}.amber{color:var(--amber)}.pill.teal{background:#23463f;border-color:#38685b}.pill.amber{background:#443d2b;border-color:#665638}.muted{color:var(--sub)}.line{height:1px;background:var(--line);margin:13px 0}.stack{display:grid;gap:10px}.twocol{display:grid;grid-template-columns:1fr 1fr;gap:9px}.metric{font-size:23px;font-weight:700;letter-spacing:-.4px}.metric small{font-size:12px;font-weight:400}.label{font-size:12px;color:var(--sub)}.metricbox{border:1px solid var(--line);background:#15222c;border-radius:11px;padding:11px;min-width:0}.metricbox .metric{font-size:21px}.hint{font-size:12px;color:var(--sub);line-height:1.5;margin-top:10px}.source{font-size:11px;color:var(--sub)}
-.pagehead{display:flex;align-items:center;justify-content:space-between;margin:0 2px 15px}.brand{display:flex;align-items:center;gap:12px}.brand h1{font-size:22px;letter-spacing:-.4px}.brand ha-icon{--mdc-icon-size:27px;color:#dce9f3}.refresh{min-width:44px;min-height:44px;border-radius:50%;background:#263644}.hero-top{display:flex;align-items:center;gap:12px}.hero-top h2{font-size:24px;letter-spacing:-.5px}.eyebrow{font-size:10px;letter-spacing:1.7px;text-transform:uppercase;font-weight:700;color:var(--teal);margin-bottom:5px}.hero-title{flex:1}.reasons{list-style:none;padding:0;margin:14px 0 0;display:grid;gap:8px}.reasons li{font-size:13px;display:flex;gap:10px;align-items:flex-start}.reasons ha-icon{--mdc-icon-size:17px;color:var(--sub)}summary{min-height:36px;cursor:pointer;font-size:12px;color:#b4c6d5;padding:8px 0}details p{font-size:13px;margin:8px 0;color:var(--sub)}.tiles{margin-top:10px}.tile{width:100%;text-align:left;padding:13px;display:flex;gap:10px;align-items:center;border:1px solid #2d3b48;border-radius:14px;background:#1b2a35;min-height:99px}.tile b{display:block;font-size:17px;margin:3px 0}.tile .orb{width:37px;height:37px}.tile .orb ha-icon{--mdc-icon-size:23px}.tile .chev{margin-left:auto;--mdc-icon-size:15px}.tile div:not(.orb){min-width:0}.tile small{font-size:11px}
+.pagehead{display:flex;align-items:center;justify-content:space-between;margin:0 2px 15px}.brand{display:flex;align-items:center;gap:12px}.brand h1{font-size:22px;letter-spacing:-.4px}.brand ha-icon{--mdc-icon-size:27px;color:#dce9f3}.refresh{min-width:44px;min-height:44px;border-radius:12px;background:#263644;display:flex;align-items:center;gap:6px;padding:8px;font-size:12px}.refreshinfo{margin:0 2px 12px}.clocktime{white-space:nowrap;display:inline-block}.dismiss,.undo{min-height:44px;padding:6px 10px;border:1px solid var(--line);border-radius:9px;font-size:12px}.taskbody{min-width:0}.taskcontrols{display:flex;justify-content:flex-end;margin-top:6px}.hero-top{display:flex;align-items:center;gap:12px}.hero-top h2{font-size:24px;letter-spacing:-.5px}.eyebrow{font-size:10px;letter-spacing:1.7px;text-transform:uppercase;font-weight:700;color:var(--teal);margin-bottom:5px}.hero-title{flex:1}.reasons{list-style:none;padding:0;margin:14px 0 0;display:grid;gap:8px}.reasons li{font-size:13px;display:flex;gap:10px;align-items:flex-start}.reasons ha-icon{--mdc-icon-size:17px;color:var(--sub)}summary{min-height:36px;cursor:pointer;font-size:12px;color:#b4c6d5;padding:8px 0}details p{font-size:13px;margin:8px 0;color:var(--sub)}.tiles{margin-top:10px}.tile{width:100%;text-align:left;padding:13px;display:flex;gap:10px;align-items:center;border:1px solid #2d3b48;border-radius:14px;background:#1b2a35;min-height:99px}.tile b{display:block;font-size:17px;margin:3px 0}.tile .orb{width:37px;height:37px}.tile .orb ha-icon{--mdc-icon-size:23px}.tile .chev{margin-left:auto;--mdc-icon-size:15px}.tile div:not(.orb){min-width:0}.tile small{font-size:11px}
 .timeline{display:grid;gap:9px}.event{display:grid;grid-template-columns:65px 1fr;gap:13px;align-items:start}.clock{font-size:11px;color:var(--sub);text-align:right;padding-top:9px;white-space:nowrap}.slot{position:relative;padding:10px 12px;border:1px solid #354556;background:#23323f;border-radius:9px;min-width:0}.slot:before{content:'';position:absolute;width:8px;height:8px;border-radius:50%;left:-18px;top:13px;background:var(--blue);box-shadow:0 0 0 4px #1a2833}.slot:after{content:'';position:absolute;top:27px;bottom:-15px;left:-15px;border-left:1px solid #3b5262}.event:last-child .slot:after{display:none}.slot.free{background:#193a37;border-color:#30645b}.slot.free:before{background:var(--teal)}.slot.rain{background:#3c3525;border-color:#746037}.slot.rain:before{background:var(--amber)}.slot b{font-size:13px}.slot small{display:block}.proposal{margin-top:9px;padding:10px;background:#102d2e80;border:1px solid #386056;border-radius:7px}.proposal a{color:#e4f5ed}.task{border:1px solid var(--line);border-radius:11px;background:#182630;padding:13px;display:flex;gap:11px}.rank{width:26px;height:26px;background:#254a43;color:var(--teal);border-radius:50%;display:grid;place-items:center;font-size:12px;flex-shrink:0}.tasktitle{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.tasktitle a{font-size:14px;color:#edf3f8;font-weight:600;overflow-wrap:anywhere}.chips{display:flex;gap:5px;flex-wrap:wrap;margin:7px 0}.chips .pill{font-size:10px;padding:2px 6px}.taskbody{flex:1;min-width:0}.task p{font-size:12px;color:var(--sub)}.empty{padding:18px;border:1px dashed #445b6b;border-radius:10px;color:var(--sub);font-size:13px;line-height:1.6}.spark{width:100%;height:78px;display:block}.spark polyline{fill:none;stroke:var(--teal);stroke-width:2;vector-effect:non-scaling-stroke}.bar{height:7px;border-radius:9px;background:#354459;overflow:hidden;margin-top:8px}.bar>i{height:100%;display:block;background:var(--teal);border-radius:9px}.bar.blue>i{background:var(--blue)}.bar.amber>i{background:var(--amber)}.barlabel{display:flex;justify-content:space-between;gap:5px;font-size:12px}.barlabel strong{font-size:12px}.nutrient{padding:11px;background:#15232f;border:1px solid var(--line);border-radius:10px}.nav{display:flex;gap:4px;justify-content:space-around;background:#152330ed;backdrop-filter:blur(16px);border:1px solid #324657;border-radius:17px;padding:6px;position:fixed;bottom:max(10px,env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:min(510px,calc(100vw - 28px));z-index:5;box-shadow:0 6px 24px #0008}.nav button{display:grid;justify-items:center;align-content:center;gap:5px;font-size:10px;min-height:49px;flex:1;border-radius:11px}.nav button.active{background:#25445c;color:#bfe2ff}.nav ha-icon{color:inherit;--mdc-icon-size:21px}.navspace{height:78px}dialog{background:#14212c;color:var(--ink);border:1px solid #496170;border-radius:20px;width:min(560px,calc(100vw - 24px));max-height:85dvh;padding:20px;overflow:auto;box-shadow:0 20px 80px #0008}dialog::backdrop{background:#020b13aa;backdrop-filter:blur(3px)}.close{border:1px solid var(--line);border-radius:10px;min-height:44px;min-width:44px}.dialoghead{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:16px}.report{display:grid;grid-template-columns:1fr auto;gap:9px;font-size:13px;padding:10px 0;border-bottom:1px solid var(--line)}.report small{grid-column:1/-1} .linkbutton{display:inline-block;border:1px solid #496170;border-radius:10px;padding:12px;margin-top:12px} @media(max-width:420px){.pad{padding:13px}.hero-top h2{font-size:20px}.hero-top{gap:9px;flex-wrap:wrap}.hero-top>.pill{margin-left:52px}.tile{padding:10px;gap:8px}.tile b{font-size:15px}.tile .orb{width:31px;height:31px}.tile .chev{display:none}.clock{font-size:10px}.event{grid-template-columns:53px 1fr;gap:12px}.pill{font-size:10px}}
 `;
 const safeLink = (t) =>
@@ -866,7 +1098,7 @@ function bars(m) {
   return `<div class="twocol">${m.n.rows.map((r, i) => `<div class="nutrient"><div class="barlabel"><span>${esc(r.label)}</span><strong>${fmt(r.total)} <span class="muted">/ ${fmt(r.target)} ${esc(r.unit)}</span></strong></div><div class="bar ${i === 1 ? "blue" : i === 3 ? "amber" : ""}" role="img" aria-label="${esc(r.label + " " + fmt(r.total) + " of " + fmt(r.target) + " " + r.unit)}"><i style="width:${r.total !== null && r.target > 0 ? Math.min(100, (r.total / r.target) * 100) : 0}%"></i></div><small>${esc(remaining(r))}</small></div>`).join("")}</div>`;
 }
 function metric(label, g) {
-  return `<div class="metricbox"><div class="label">${esc(label)}</div><div class="metric">${fmt(g.value)} <small>${esc(g.unit)}</small></div><small class="${g.fresh ? "" : "amber"}">${g.fresh ? "Current" : esc(g.reason)}</small></div>`;
+  return `<div class="metricbox"><div class="label">${esc(label)}</div><div class="metric">${fmt(g.value)} <small>${esc(g.unit)}</small></div><small class="${g.fresh ? "" : "amber"}">${g.fresh ? "Today" : esc(g.reason)}</small></div>`;
 }
 function spark(m) {
   if (m.curve.length < 2)
@@ -884,9 +1116,9 @@ function spark(m) {
     group.push(p);
   }
   groups.push(group);
-  return `<svg class="spark" viewBox="0 0 320 80" preserveAspectRatio="none" role="img" aria-label="Today's Body Battery samples; gaps are not interpolated">${groups.map((g) => `<polyline points="${g.map((p) => `${(((p[0] - first) / Math.max(1, last - first)) * 312 + 4).toFixed(1)},${(76 - p[1] * 0.7).toFixed(1)}`).join(" ")}"/>`).join("")}</svg><div class="barlabel muted"><span>${time(first, m)}</span><span>${time(last, m)} · samples end</span></div>`;
+  return `<svg class="spark" viewBox="0 0 320 80" preserveAspectRatio="none" role="img" aria-label="Today's Body Battery samples; gaps are not interpolated">${groups.map((g) => `<polyline points="${g.map((p) => `${(((p[0] - first) / Math.max(1, last - first)) * 312 + 4).toFixed(1)},${(76 - p[1] * 0.7).toFixed(1)}`).join(" ")}"/>`).join("")}</svg><div class="barlabel muted"><span>${clock(first, m)}</span><span>${clock(last, m)}</span></div>`;
 }
-function brief(m) {
+function brief(m, controller) {
   const g = m.g,
     n = m.n.rows[1],
     wa = m.weatherAttrs;
@@ -904,17 +1136,17 @@ function brief(m) {
       : "Calendar availability is not confirmed",
     m.n.fresh && m.n.complete
       ? `Logged nutrition: ${remaining(n)} protein`
-      : "Nutrition is older, incomplete or unavailable",
+      : `Nutrition: ${diaryStatus(m)}`,
   ];
   const tile = (kind, ico, label, value, note, tone) =>
-    `<button class="tile" data-detail="${kind}"><div class="orb ${tone}">${icon(ico)}</div><div><span class="label">${label}</span><b>${esc(value)}</b><small>${esc(note)}</small></div>${icon("chevron-right", "chev")}</button>`;
-  return `<div class="pagehead"><div class="brand">${icon("home-outline")}<div><h1>My day</h1><small>${new Date(m.now).toLocaleDateString(undefined, { timeZone: m.zone, weekday: "long", month: "long", day: "numeric" })}</small></div></div><button class="refresh" data-refresh aria-label="Refresh dashboard">${icon("refresh")}</button></div><ha-card class="pad"><div class="hero-top"><div class="orb ${m.rec.tone}">${icon("white-balance-sunny")}</div><div class="hero-title"><div class="eyebrow">Today · Huzband</div><h2>${esc(m.rec.title)}</h2></div>${pill(m.rec.effort, m.rec.tone)}</div><ul class="reasons">${reasons.map((r, i) => `<li>${icon(["heart-outline", "chart-bar", "calendar-blank-outline", "silverware-fork-knife"][i])}<span>${esc(r)}</span></li>`).join("")}</ul><div class="line"></div><details><summary>Why this recommendation?</summary><p>${m.rec.reasons.map(esc).join(". ")}.</p><p>Policy: Body Battery ≥35, sleep ≥60 and HRV within Garmin's range support moderate effort. Low readiness or remaining recovery time favors easy movement. These are v0.1 planning cues, not Garmin prescriptions.</p><p>Training load is context; it does not establish an aerobic deficit. Available time comes only from your selected Google calendar.</p><p>${Object.entries(
+    `<button class="tile" data-detail="${kind}"><div class="orb ${tone}">${icon(ico)}</div><div><span class="label">${label}</span><b>${esc(value)}</b><small>${clockText(note)}</small></div>${icon("chevron-right", "chev")}</button>`;
+  return `<div class="pagehead"><div class="brand">${icon("home-outline")}<div><h1>My day</h1><small>${new Date(m.now).toLocaleDateString(undefined, { timeZone: m.zone, weekday: "long", month: "long", day: "numeric" })}</small></div></div><button class="refresh" data-refresh aria-label="Refresh dashboard">${icon("refresh")}<span>${controller.busy ? "Checking…" : "Refresh"}</span></button></div><div class="refreshinfo"><p class="hint" role="status" aria-live="polite">${esc(controller.refreshState?.text ?? "")}</p><details><summary>What does Refresh do?</summary><p>Checks the dashboard data available through Home Assistant. Source integrations update on their own schedules.</p></details></div><ha-card class="pad"><div class="hero-top"><div class="orb ${m.rec.tone}">${icon("white-balance-sunny")}</div><div class="hero-title"><div class="eyebrow">Today · Huzband</div><h2>${esc(m.rec.title)}</h2></div>${pill(m.rec.effort, m.rec.tone)}</div><ul class="reasons">${reasons.map((r, i) => `<li>${icon(["heart-outline", "chart-bar", "calendar-blank-outline", "silverware-fork-knife"][i])}<span>${esc(r)}</span></li>`).join("")}</ul><div class="line"></div><details><summary>Why this recommendation?</summary><p>${m.rec.reasons.map(esc).join(". ")}.</p><p>Policy: Body Battery ≥35, sleep ≥60 and HRV within Garmin's range support moderate effort. Low readiness or remaining recovery time favors easy movement. These are v0.1 planning cues, not Garmin prescriptions.</p><p>Training load is context; it does not establish an aerobic deficit. Available time comes only from your selected Google calendar.</p><p>${Object.entries(
     m.sources,
   )
     .map(([k, v]) => esc(k) + ": " + esc(v))
     .join(
       " · ",
-    )}</p></details></ha-card><div class="twocol tiles">${tile("recovery", "lightning-bolt", "Energy", `${fmt(g.body_battery.value)} Body Battery`, g.body_battery.fresh ? `Sleep score ${fmt(g.sleep_score.value)}` : "Older / unverified observation", "blue")}${tile("training", "bike", "Training", m.rec.training, m.trainingMinutes >= 10 ? `Up to ${Math.floor(m.trainingMinutes)} min fits calendar` : "No confirmed training window", "")}${tile("weather", "weather-partly-cloudy", "Weather", `${fmt(wa.temperature)}${wa.temperature_unit ?? ""}`, rain ? `Rain risk around ${time(Date.parse(rain.datetime), m)}` : m.forecast.length ? "Forecast available" : "Forecast unavailable", "blue")}${tile("nutrition", "silverware-fork-knife", "Nutrition", m.n.fresh && m.n.complete ? `${remaining(n)} protein` : "Check nutrition", m.n.fresh && m.n.complete ? remaining(m.n.rows[0]) : m.n.date ? `Older diary: ${m.n.date}` : "Awaiting a current diary", "amber")}</div>`;
+    )}</p></details></ha-card><div class="twocol tiles">${tile("recovery", "lightning-bolt", "Energy", `${fmt(g.body_battery.value)} Body Battery`, g.body_battery.fresh ? `Sleep score ${fmt(g.sleep_score.value)}` : "Older / unverified observation", "blue")}${tile("training", "bike", "Training", m.rec.training, m.trainingMinutes >= 10 ? `Up to ${Math.floor(m.trainingMinutes)} min fits calendar` : "No confirmed training window", "")}${tile("weather", "weather-partly-cloudy", "Weather", `${fmt(wa.temperature)}${wa.temperature_unit ?? ""}`, rain ? `${fmt(number(rain.precipitation_probability))}% chance of rain around ${time(Date.parse(rain.datetime), m)}` : m.forecast.length ? "Forecast available" : "Forecast unavailable", "blue")}${tile("nutrition", "silverware-fork-knife", "Nutrition", n?.total !== null && n?.target !== null ? `${remaining(n)} protein` : "Check nutrition", `${remaining(m.n.rows[0])} · ${diaryStatus(m)}`, "amber")}</div>`;
 }
 function timeline(m, cfg) {
   const rows = [];
@@ -953,15 +1185,15 @@ function timeline(m, cfg) {
     });
   }
   rows.sort((a, b) => a.at - b.at);
-  return `<ha-card class="pad"><div class="head"><h2>${icon("calendar-clock-outline")}Today's timeline</h2><small>${m.zone}</small></div><p class="sub" style="margin-bottom:14px">Your schedule, weather & open time</p>${m.sc.allDay.map((e) => `<div class="empty">All day: ${esc(e.summary ?? "Event")} · availability needs review</div>`).join("")}${!m.cal ? '<div class="empty">Calendar unavailable. Free time is not assumed.</div>' : m.sc.uncertain ? '<p class="hint amber">An event has uncertain availability. Free-block suggestions are paused.</p>' : ""}<div class="timeline">${rows.map((r) => r.html).join("")}</div>${!rows.length && m.cal ? '<div class="empty">No remaining blocks in your planning day.</div>' : ""}<p class="hint">Planning hours ${cfg.start_hour}:00–${cfg.end_hour}:00. Suggestions reserve no time. Todoist calendars are excluded.</p></ha-card>`;
+  return `<ha-card class="pad"><div class="head"><h2>${icon("calendar-clock-outline")}Today's timeline</h2>${cfg.show_time_zone ? `<small>${esc(m.zone)}</small>` : ""}</div><p class="sub" style="margin-bottom:14px">Your schedule, weather events, and open time</p>${m.sc.allDay.map((e) => `<div class="empty">All day: ${esc(e.summary ?? "Event")} · availability needs review</div>`).join("")}${!m.cal ? '<div class="empty">Calendar unavailable. Free time is not assumed.</div>' : m.sc.uncertain ? '<p class="hint amber">An event has uncertain availability. Free-block suggestions are paused.</p>' : ""}<div class="timeline">${rows.map((r) => r.html).join("")}</div>${!rows.length && m.cal ? '<div class="empty">No remaining blocks in your planning day.</div>' : ""}<details><summary>How this timeline works</summary><p>Planning hours ${hourText(cfg.start_hour)}–${hourText(cfg.end_hour)}.</p><p>Suggested activities and tasks are only recommendations. They do not create calendar events or hold time on your calendar.</p><p>Todoist project calendars are excluded to avoid showing tasks twice.</p></details></ha-card>`;
 }
 function actions(m) {
   const items = m.ranked.slice(0, 3);
   return `<ha-card class="pad"><div class="head"><h2>${icon("checkbox-marked-outline")}Suggested actions</h2><small>Ranked for today</small></div>${
     !m.taskOk
-      ? '<div class="empty">Task data is incomplete, older or unavailable. Ranking resumes after a complete fresh read.</div>'
+      ? `<div class="empty">${esc(m.taskState.text)}${m.taskState.code !== "loading" ? '<button class="linkbutton" data-refresh>Refresh tasks</button>' : ""}</div>`
       : !items.length
-        ? '<div class="empty">No active tasks returned.</div>'
+        ? `<div class="empty">${m.dismissedCount ? "No more suggestions in this session. Undo a dismissal to show it again." : "No active tasks returned."}</div>`
         : `<div class="stack">${items
             .map(
               (r, i) =>
@@ -970,18 +1202,18 @@ function actions(m) {
                     ?.slice(0, 3)
                     .map((l) => pill(l))
                     .join("") ?? ""
-                }</div><p>${esc(r.reasons.join(" · "))}</p></div></article>`,
+                }</div><p>${esc(r.reasons.join(" · "))}</p><div class="taskcontrols"><button class="dismiss" data-dismiss="${esc(r.task.id)}" aria-label="Dismiss ${esc(r.task.content)}">Dismiss</button></div></div></article>`,
             )
             .join("")}</div>`
-  }<details><summary>How tasks are ranked</summary><p>Overdue and due-today tasks first, then priority and known time fit. Unknown duration is never treated as zero. Weather, daylight and effort constraints apply when labels specify them. Task links open Todoist without changing anything.</p></details></ha-card>`;
+  } ${m.dismissedCount ? `<p class="hint" role="status">${m.dismissedCount} dismissed for this session. <button class="undo" data-undo>Undo last dismissal</button></p>` : ""}<details><summary>How tasks are ranked</summary><p>Overdue and due-today tasks first, then priority and known time fit. Unknown duration is never treated as zero. Weather, daylight and effort constraints apply when labels specify them. Task links open Todoist without changing anything. Dismiss hides a suggestion here and in the timeline until the dashboard reloads or a new day begins; it does not change Todoist.</p></details></ha-card>`;
 }
 function signals(m) {
   const g = m.g;
-  return `<ha-card class="pad"><div class="head"><h2>${icon("chart-bar")}Underlying signals</h2><button data-detail="recovery" class="sub">Why these suggestions ${icon("chevron-right")}</button></div><div class="metricbox"><div class="head"><div><span class="label">Body Battery</span><div class="metric">${fmt(g.body_battery.value)}</div></div>${pill(g.body_battery.fresh ? "Current" : "Older", "muted")}</div>${spark(m)}</div><div class="twocol" style="margin:9px 0">${metric("Last-night HRV", g.hrv_last_night_average)}${metric("Resting heart rate", g.resting_heart_rate)}${metric("Steps · goal " + fmt(g.daily_step_goal.value), g.steps)}${metric("Acute training load", g.acute_training_load)}</div><div class="head"><h3>Nutrition</h3>${pill(m.n.fresh && m.n.complete ? "Current diary" : "Older / incomplete", m.n.fresh ? "teal" : "amber")}</div>${bars(m)}<p class="hint">Logged intake only · ${esc(m.n.date ?? "No diary date")}. ${m.n.queued ? "Refresh is queued; displayed data is not yet updated." : ""}</p></ha-card>`;
+  return `<ha-card class="pad"><div class="head"><h2>${icon("chart-bar")}Underlying signals</h2><button data-detail="recovery" class="sub">Why these suggestions ${icon("chevron-right")}</button></div><div class="metricbox"><div class="head"><div><span class="label">Body Battery</span><div class="metric">${fmt(g.body_battery.value)}</div></div>${pill(g.body_battery.fresh ? "Current" : "Older", "muted")}</div>${spark(m)}</div><div class="twocol" style="margin:9px 0">${metric("Last-night HRV", g.hrv_last_night_average)}${metric("Resting heart rate", g.resting_heart_rate)}${metric("Steps · goal " + fmt(g.daily_step_goal.value), g.steps)}${metric("Acute training load", g.acute_training_load)}</div><div class="head"><h3>Nutrition</h3>${pill(m.n.ageText, m.n.fresh ? "teal" : "amber")}</div>${bars(m)}<p class="hint">Logged intake only · ${esc(diaryStatus(m))}. ${m.n.queued ? "Refresh is queued; displayed data is not yet updated." : ""}</p></ha-card>`;
 }
 function detail(kind, m) {
   if (kind === "nutrition")
-    return `<p class="hint">${m.n.fresh && m.n.complete ? "Current diary" : "Older or incomplete diary — remaining values describe the displayed log only."}</p><p class="hint">${esc(m.n.date ?? "No diary date")} · Source ${esc(m.n.at ?? "unavailable")}</p><div class="line"></div>${bars(m)}<p class="hint">Targets are from MyFitnessPal. A partial food log does not establish a nutritional deficit.</p>`;
+    return `<p class="hint">${esc(diaryStatus(m))}</p><div class="line"></div>${bars(m)}<p class="hint">Logged intake only. Targets are from MyFitnessPal.${m.n.queued ? " A newer diary has been requested; these are the previously retrieved values." : ""}</p>`;
   if (kind === "weather")
     return `<div class="stack">${
       m.forecast
@@ -1012,7 +1244,35 @@ function detail(kind, m) {
             "hrv_balanced_range_upper",
             "resting_heart_rate",
           ];
-  return `${kind === "recovery" ? spark(m) : ""}${keys.map((k) => `<div class="report"><span>${esc(k.replaceAll("_", " "))}</span><b>${fmt(m.g[k].value)} ${esc(m.g[k].unit)}</b><small>${esc(m.g[k].reason)} · source ${esc(m.g[k].sourceDate ?? "unknown")} · fetched ${esc(m.g[k].at ?? "unknown")}</small></div>`).join("")}<p class="hint">${kind === "training" ? "Load ratio is context, not proof of a base-training deficit. Optional readiness/recovery values may not be supplied." : kind === "activity" ? "Steps versus normal and full historical activity analytics are deferred." : "Thresholds are planning policy. No RHR normal/abnormal claim is made without a personal baseline."}</p>`;
+  const labels = {
+    body_battery: "Body Battery",
+    sleep_score: "Sleep score",
+    hrv_last_night_average: "Last-night HRV",
+    hrv_balanced_range_lower: "HRV balanced range",
+    resting_heart_rate: "Resting heart rate",
+    acute_training_load: "Acute training load",
+    chronic_training_load: "Chronic training load",
+    training_load_ratio: "Training-load ratio",
+    training_readiness: "Training readiness",
+    recovery_time: "Recovery time",
+    steps: "Steps",
+    daily_step_goal: "Daily step goal",
+  };
+  const hrv = m.g.hrv_last_night_average,
+    lo = m.g.hrv_balanced_range_lower,
+    hi = m.g.hrv_balanced_range_upper;
+  const compare =
+    [hrv, lo, hi].every((g) => g.fresh && g.value !== null) &&
+    lo.value <= hi.value
+      ? `${hrv.value < lo.value ? "Below" : hrv.value > hi.value ? "Above" : "Within"} Garmin's balanced range (${fmt(lo.value)}–${fmt(hi.value)} ms)`
+      : "";
+  return `${kind === "recovery" ? spark(m) : ""}${keys
+    .filter((k) => k !== "hrv_balanced_range_upper")
+    .map(
+      (k) =>
+        `<div class="report"><span>${labels[k] ?? esc(k)}</span><b>${k === "hrv_balanced_range_lower" ? `${fmt(lo.value)}–${fmt(hi.value)} ms` : `${fmt(m.g[k].value)} ${esc(m.g[k].unit)}`}</b><small>${esc(garminNote(m.g[k], m))}${k === "hrv_balanced_range_lower" && garminNote(hi, m) !== garminNote(lo, m) ? ` · Upper bound: ${esc(garminNote(hi, m))}` : ""}${k === "hrv_last_night_average" && compare ? `<br>${esc(compare)}` : ""}</small></div>`,
+    )
+    .join("")}`;
 }
 const Base = globalThis.HTMLElement ?? class {};
 class PersonalCard extends Base {
@@ -1025,6 +1285,11 @@ class PersonalCard extends Base {
   setConfig(config) {
     if (!/^calendar\.[a-z0-9_]+$/.test(config.calendar ?? ""))
       throw Error("Configure exactly one planning calendar");
+    if (
+      config.show_time_zone !== undefined &&
+      typeof config.show_time_zone !== "boolean"
+    )
+      throw Error("show_time_zone must be true or false");
     for (const k of ["start_hour", "end_hour"])
       if (
         config[k] !== undefined &&
@@ -1079,20 +1344,27 @@ class PersonalCard extends Base {
     const focusKey =
       active?.getAttribute("data-detail") ??
       (active?.hasAttribute("data-refresh") ? "refresh" : null);
-    const open = this.shadowRoot.querySelector("details")?.open;
+    const open = [...this.shadowRoot.querySelectorAll("details")].map(
+      (d) => d.open,
+    );
     const dialogKind = this.dialogKind;
     this.lastRender = Date.now();
     const m = buildModel(
       this._hass,
       this.controller.cache,
       this.controller.cfg,
+      Date.now(),
+      this.controller.dismissed(),
     );
     this.model = m;
     const content =
       this.mode === "brief"
-        ? brief(m)
+        ? brief(m, this.controller)
         : this.mode === "timeline"
-          ? timeline(m, this.controller.cfg)
+          ? timeline(m, {
+              ...this.controller.cfg,
+              show_time_zone: this.config.show_time_zone ?? false,
+            })
           : this.mode === "actions"
             ? actions(m)
             : this.mode === "signals"
@@ -1110,15 +1382,31 @@ class PersonalCard extends Base {
                   )
                   .join("")}</nav>`;
     this.shadowRoot.innerHTML = `<style>${CSS}</style>${content}<dialog aria-label="Dashboard details"><div class="dialoghead"><h2></h2><button class="close" aria-label="Close details">${icon("close")}</button></div><div class="detailcontent"></div></dialog>`;
-    if (open && this.shadowRoot.querySelector("details"))
-      this.shadowRoot.querySelector("details").open = true;
+    this.shadowRoot.querySelectorAll("details").forEach((d, i) => {
+      d.open = open[i] ?? false;
+    });
     for (const el of this.shadowRoot.querySelectorAll("[data-detail]"))
       el.onclick = () => this.showDetail(el.dataset.detail);
-    const refresh = this.shadowRoot.querySelector("[data-refresh]");
-    if (refresh) {
+    for (const refresh of this.shadowRoot.querySelectorAll("[data-refresh]")) {
       refresh.disabled = this.controller.busy;
       refresh.onclick = () => this.controller.poll(true);
     }
+    for (const el of this.shadowRoot.querySelectorAll("[data-dismiss]"))
+      el.onclick = () => {
+        this.controller.dismiss(el.dataset.dismiss);
+        this.shadowRoot
+          .querySelector("[data-undo]")
+          ?.focus({ preventScroll: true });
+      };
+    const undo = this.shadowRoot.querySelector("[data-undo]");
+    if (undo)
+      undo.onclick = () => {
+        this.controller.undoDismiss();
+        (
+          this.shadowRoot.querySelector("[data-undo]") ??
+          this.shadowRoot.querySelector("[data-dismiss]")
+        )?.focus({ preventScroll: true });
+      };
     const dialog = this.shadowRoot.querySelector("dialog");
     dialog.querySelector(".close").onclick = () => dialog.close();
     dialog.onclose = () => {

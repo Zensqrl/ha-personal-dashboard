@@ -15,7 +15,12 @@
               "type": "custom:personal-day-brief",
               "calendar": "calendar.your_google_calendar",
               "nutrition_api": "mcp-YOUR_API_ID",
-              "grid_options": { "columns": "full", "rows": "auto" }
+              "grid_options": {
+                "columns": "full",
+                "rows": "auto"
+              },
+              "start_hour": 8,
+              "end_hour": 21
             }
           ]
         },
@@ -26,7 +31,13 @@
               "type": "custom:personal-day-timeline",
               "calendar": "calendar.your_google_calendar",
               "nutrition_api": "mcp-YOUR_API_ID",
-              "grid_options": { "columns": "full", "rows": "auto" }
+              "grid_options": {
+                "columns": "full",
+                "rows": "auto"
+              },
+              "start_hour": 8,
+              "end_hour": 21,
+              "show_time_zone": false
             }
           ]
         },
@@ -37,13 +48,23 @@
               "type": "custom:personal-suggested-actions",
               "calendar": "calendar.your_google_calendar",
               "nutrition_api": "mcp-YOUR_API_ID",
-              "grid_options": { "columns": "full", "rows": "auto" }
+              "grid_options": {
+                "columns": "full",
+                "rows": "auto"
+              },
+              "start_hour": 8,
+              "end_hour": 21
             },
             {
               "type": "custom:personal-signals",
               "calendar": "calendar.your_google_calendar",
               "nutrition_api": "mcp-YOUR_API_ID",
-              "grid_options": { "columns": "full", "rows": "auto" }
+              "grid_options": {
+                "columns": "full",
+                "rows": "auto"
+              },
+              "start_hour": 8,
+              "end_hour": 21
             }
           ]
         },
@@ -55,7 +76,12 @@
               "type": "custom:personal-navigation",
               "calendar": "calendar.your_google_calendar",
               "nutrition_api": "mcp-YOUR_API_ID",
-              "grid_options": { "columns": "full", "rows": "auto" }
+              "grid_options": {
+                "columns": "full",
+                "rows": "auto"
+              },
+              "start_hour": 8,
+              "end_hour": 21
             }
           ]
         }

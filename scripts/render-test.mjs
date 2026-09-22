@@ -29,6 +29,82 @@ try {
       false,
       "No horizontal overflow",
     );
+    const brief = page.locator("personal-day-brief");
+    const timeline = page.locator("personal-day-timeline");
+    const actions = page.locator("personal-suggested-actions");
+    await timeline
+      .getByText("Your schedule, weather events, and open time", {
+        exact: true,
+      })
+      .waitFor();
+    assert.equal(await timeline.locator(".head small").count(), 0);
+    await timeline
+      .getByText("How this timeline works", { exact: true })
+      .click();
+    await timeline
+      .getByText("Suggested activities and tasks are only recommendations.", {
+        exact: false,
+      })
+      .waitFor();
+    await timeline
+      .getByText("How this timeline works", { exact: true })
+      .click();
+    await actions
+      .getByRole("button", {
+        name: "Dismiss Update the home server",
+        exact: true,
+      })
+      .click();
+    assert.equal(
+      await actions
+        .getByText("Update the home server", { exact: true })
+        .count(),
+      0,
+    );
+    assert.equal(
+      await timeline
+        .getByText("Update the home server", { exact: true })
+        .count(),
+      0,
+    );
+    await actions
+      .getByText("Review tomorrow's checklist", { exact: true })
+      .waitFor();
+    await actions.getByRole("button", { name: "Undo last dismissal" }).click();
+    await actions
+      .getByText("Update the home server", { exact: true })
+      .waitFor();
+    await brief.getByRole("button", { name: "Refresh dashboard" }).click();
+    await brief
+      .getByText(
+        "Data was just checked. Wait 10 seconds before checking again.",
+      )
+      .waitFor();
+    await page
+      .locator("personal-navigation")
+      .getByRole("button", { name: "Recovery", exact: true })
+      .click();
+    const recovery = page.getByRole("dialog").filter({ visible: true });
+    assert.ok(!(await recovery.innerText()).includes("samples end"));
+    assert.ok(!(await recovery.innerText()).includes("fetched"));
+    await recovery
+      .getByText("Within Garmin's balanced range", { exact: false })
+      .waitFor();
+    await recovery.getByRole("button", { name: "Close details" }).click();
+    const timeTokens = await brief
+      .locator(".clocktime")
+      .evaluateAll((nodes) =>
+        nodes.map((n) => ({
+          text: n.textContent,
+          wrap: getComputedStyle(n).whiteSpace,
+        })),
+      );
+    assert.ok(timeTokens.length > 0);
+    assert.ok(
+      timeTokens.every(
+        (n) => /\d:\d\d(?:am|pm)/.test(n.text) && n.wrap === "nowrap",
+      ),
+    );
     await page.screenshot({
       path: new URL(
         `../.local/preview-${width}.png`,
@@ -48,6 +124,9 @@ try {
     await page.getByText("Toggle source failure", { exact: true }).click();
     await page
       .getByText("Calendar unavailable. Free time is not assumed.")
+      .waitFor();
+    await actions
+      .getByText("Could not load Todoist tasks.", { exact: false })
       .waitFor();
     assert.deepEqual(errors, []);
     await page.close();

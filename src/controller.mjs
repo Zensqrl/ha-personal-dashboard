@@ -1,17 +1,50 @@
-import { DEFAULTS, dayKey, bounds, unpack } from "./model.mjs";
+import {
+  DEFAULTS,
+  dayKey,
+  bounds,
+  unpack,
+  taskStatus,
+  nutrition,
+} from "./model.mjs";
 const controllers = new WeakMap();
+const sessions = new WeakMap();
+function sessionFor(hass) {
+  const connection = hass.connection ?? hass;
+  let users = sessions.get(connection);
+  if (!users) sessions.set(connection, (users = new Map()));
+  const user = hass.user?.id ?? "current";
+  if (!users.has(user))
+    users.set(user, {
+      day: null,
+      dismissed: new Set(),
+      undo: [],
+      controllers: new Set(),
+    });
+  return users.get(user);
+}
+export function readError(error) {
+  const code = String(error?.code ?? "");
+  const message = String(error?.message ?? "");
+  if (/unauthorized|auth|forbidden/i.test(code)) return "auth";
+  if (/unknown_command|not_found/i.test(code)) return "unavailable";
+  if (message === "Invalid task response") return "contract";
+  if (message === "Timed out") return "timeout";
+  return "connection";
+}
 export function getController(hass, config) {
   let map = controllers.get(hass.connection);
   if (!map) {
     map = new Map();
     controllers.set(hass.connection, map);
   }
-  const { type, grid_options, ...options } = config;
-  const key = JSON.stringify(
-    Object.fromEntries(
-      Object.entries(options).sort(([a], [b]) => a.localeCompare(b)),
-    ),
-  );
+  const { type, grid_options, show_time_zone, ...options } = config;
+  const key =
+    (hass.user?.id ?? "current") +
+    JSON.stringify(
+      Object.fromEntries(
+        Object.entries(options).sort(([a], [b]) => a.localeCompare(b)),
+      ),
+    );
   if (!map.has(key)) map.set(key, new Controller(hass, options));
   return map.get(key);
 }
@@ -27,12 +60,15 @@ export class Controller {
     this.listeners = new Set();
     this.timer = null;
     this.busy = false;
+    this.refreshState = { kind: "idle", text: "" };
+    this.session = sessionFor(hass);
     this.refresh = () => this.poll();
     this.visibility = () => {
       if (!document.hidden) this.poll(true);
     };
   }
   subscribe(fn) {
+    this.session.controllers.add(this);
     this.listeners.add(fn);
     if (this.listeners.size === 1) {
       this.timer = setInterval(() => this.poll(), 60000);
@@ -43,6 +79,7 @@ export class Controller {
     return () => {
       this.listeners.delete(fn);
       if (!this.listeners.size) {
+        this.session.controllers.delete(this);
         clearInterval(this.timer);
         document.removeEventListener("visibilitychange", this.visibility);
       }
@@ -50,6 +87,27 @@ export class Controller {
   }
   emit() {
     for (const fn of this.listeners) fn();
+  }
+  dismissed(now = Date.now()) {
+    const day = dayKey(now, this.hass.config.time_zone);
+    if (this.session.day !== day) {
+      this.session.day = day;
+      this.session.dismissed.clear();
+      this.session.undo = [];
+    }
+    return this.session.dismissed;
+  }
+  dismiss(id) {
+    const set = this.dismissed();
+    if (!set.has(String(id))) {
+      set.add(String(id));
+      this.session.undo.push(String(id));
+    }
+    for (const c of this.session.controllers) c.emit();
+  }
+  undoDismiss() {
+    this.dismissed().delete(this.session.undo.pop());
+    for (const c of this.session.controllers) c.emit();
   }
   async read(key, fn, day) {
     let timer;
@@ -61,11 +119,19 @@ export class Controller {
           timer.unref?.();
         }),
       ]);
-      this.cache[key] = { data, ok: true, at: Date.now(), day, failures: 0 };
-    } catch {
+      this.cache[key] = {
+        data,
+        ok: true,
+        at: Date.now(),
+        lastSuccessAt: Date.now(),
+        day,
+        failures: 0,
+      };
+    } catch (error) {
       this.cache[key] = {
         ...this.cache[key],
         ok: false,
+        error: readError(error),
         at: Date.now(),
         day,
         failures: (this.cache[key]?.failures ?? 0) + 1,
@@ -75,21 +141,46 @@ export class Controller {
     }
   }
   async poll(force = false) {
-    if (this.busy || !this.listeners.size || document.hidden) return;
+    if (this.busy || !this.listeners.size || document.hidden) {
+      if (force) {
+        if (this.busy) this.manualRequested = true;
+        this.refreshState = {
+          kind: "waiting",
+          text: this.busy
+            ? "A data check is already running…"
+            : "Open the dashboard to check data.",
+        };
+        this.emit();
+      }
+      return;
+    }
     this.busy = true;
+    this.manualRequested = force;
+    if (force)
+      this.refreshState = {
+        kind: "checking",
+        text: "Checking dashboard data…",
+      };
+    this.emit();
     const now = Date.now(),
       zone = this.hass.config.time_zone,
       day = dayKey(now, zone),
       b = bounds(now, zone, this.cfg);
-    const needs = (key, ttl) =>
-      !this.cache[key] ||
-      this.cache[key].day !== day ||
-      now - this.cache[key].at >=
-        (this.cache[key].failures
-          ? Math.min(900000, 60000 * 2 ** (this.cache[key].failures - 1))
-          : force
-            ? 10000
-            : ttl);
+    const attempted = [],
+      skipped = [];
+    const needs = (key, ttl) => {
+      const ready =
+        !this.cache[key] ||
+        this.cache[key].day !== day ||
+        now - this.cache[key].at >=
+          (this.cache[key].failures
+            ? Math.min(900000, 60000 * 2 ** (this.cache[key].failures - 1))
+            : force
+              ? 10000
+              : ttl);
+      (ready ? attempted : skipped).push(key);
+      return ready;
+    };
     const jobs = [];
     if (needs("tasks", 300000))
       jobs.push(
@@ -186,6 +277,54 @@ export class Controller {
       );
     await Promise.allSettled(jobs);
     this.busy = false;
+    if (this.manualRequested) {
+      const names = {
+        tasks: "Todoist tasks",
+        calendar: "calendar",
+        weather: "weather",
+        nutrition: "nutrition",
+      };
+      const failed = attempted.filter((key) => !this.cache[key]?.ok);
+      const waiting = skipped.filter((key) => this.cache[key]?.failures);
+      const attention = [];
+      if (
+        this.cache.tasks?.ok &&
+        taskStatus(this.cache.tasks, Date.now()).code !== "ready"
+      )
+        attention.push("Todoist data needs attention; see Suggested actions");
+      if (this.cache.nutrition?.ok) {
+        const n = nutrition(this.cache.nutrition.data, day, Date.now());
+        if (!n.fresh || !n.complete)
+          attention.push("nutrition is older or incomplete; see Nutrition");
+      }
+      this.refreshState = {
+        kind:
+          failed.length || waiting.length || attention.length
+            ? "partial"
+            : attempted.length
+              ? "success"
+              : "cooldown",
+        text: !attempted.length
+          ? waiting.length
+            ? "Retry waiting for " +
+              waiting.map((k) => names[k]).join(", ") +
+              ". Automatic retries continue."
+            : "Data was just checked. Wait 10 seconds before checking again."
+          : failed.length
+            ? "Could not check " +
+              failed.map((k) => names[k]).join(", ") +
+              ". Other data checks completed."
+            : "Dashboard data checked." +
+              (waiting.length
+                ? " Retry waiting for " +
+                  waiting.map((k) => names[k]).join(", ") +
+                  "."
+                : ""),
+      };
+      if (attention.length)
+        this.refreshState.text += " " + attention.join("; ") + ".";
+      this.manualRequested = false;
+    }
     this.emit();
   }
 }

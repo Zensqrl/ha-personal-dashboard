@@ -1,7 +1,9 @@
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 const root = new URL("../", import.meta.url);
-let code =
-  "// Huzband Dashboard v0.1.0 — built from tracked source. No remote imports.\n";
+const { version } = JSON.parse(
+  await readFile(new URL("package.json", root), "utf8"),
+);
+let code = `// Huzband Dashboard v${version} — built from tracked source. No remote imports.\n`;
 for (const file of ["model", "controller", "cards"]) {
   code +=
     (await readFile(new URL(`src/${file}.mjs`, root), "utf8"))

@@ -45,6 +45,14 @@ The new view uses native Sections for the outer layout. Four tiles remain two-up
 
 Defaults: planning hours 08:00–21:00 HA-local time, 10 minute buffer, preferred training duration 30 minutes (15 for low recovery), rain probability threshold 30%, outdoor temperature 10–30°C, maximum sustained wind 30 km/h, Garmin source age 120 minutes. These are prototype planning preferences, not medical thresholds. Planning hours and weather/duration settings can be set per card.
 
+Set `start_hour` and `end_hour` to whole hours from 0 through 23, with start before end. Set the same scheduling options on the brief, timeline, suggested-actions, signals and navigation cards so recommendations agree. The timeline's `show_time_zone` option defaults to `false`; set it to `true` to show the HA time-zone label. This display option does not change time conversion or split the shared data controller. Planning details are under **How this timeline works**.
+
+The **Refresh** button checks data available through HA and reports progress, failure or a retry delay. It does not force an upstream Garmin/Todoist/MyFitnessPal sync. Task errors identify missing, incomplete, older or inaccessible data and suggest a relevant next action.
+
+**Dismiss** hides a suggested task from the list and timeline for the current dashboard session, then fills its position with the next ranked task. **Undo last dismissal** restores it. Dismissals reset on reload/reconnection or a new HA-local day; they do not change Todoist and are not stored in browser storage. Cross-device persistence is deferred to v0.2.
+
+Garmin detail rows show the source day and flag fallback/retained readings. Fetch and device-sync times are not presented as measurement times. Nutrition shows **Data checked** age bands (>15 min, >30 min, >1 hr, >2 hr), separately from incomplete totals/targets and an older diary date. These bands describe `retrieved_at`, not the time food was eaten or edited.
+
 Recovery uses current Body Battery, sleep and HRV relative to Garmin bounds. Body Battery below 35, sleep below 60, HRV outside bounds, optional training readiness below 40 or positive recovery time favor easy movement. Missing, retained, failed, wrong-day or old inputs suppress a strong recommendation. RHR is displayed without an unsupported normal/abnormal claim. Load metrics are context, not a load-focus deficit diagnosis.
 
 Task ordering: overdue, then due today, then priority, then known time fit, with stable ID tie-breaking. No missing duration is treated as zero. Native/label duration inference is owned by Todoist Enhanced. Configure `labels` to map your exact task label names to `outdoor`, `indoor`, `dry`, `daylight`, `physical` or `focus`. Defaults include outdoor/outside, indoor/indoors, dry, daylight, physical/high-physical, focus/high-focus. Unspecified suitability is explicitly noted. High-focus labels are displayed as context; no unsupported cognitive readiness score is inferred.

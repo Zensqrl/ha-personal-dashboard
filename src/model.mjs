@@ -1,9 +1,10 @@
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 export const DEFAULTS = Object.freeze({
   calendar: null,
   weather: "weather.pirateweather",
   start_hour: 8,
   end_hour: 21,
+  show_time_zone: false,
   rain_probability: 30,
   min_temp_c: 10,
   max_temp_c: 30,
@@ -134,6 +135,7 @@ export function garmin(states, key, now, zone, cfg) {
     !!p &&
     ["ok", "success"].includes(p.latest_outcome ?? p.outcome) &&
     !p.retained &&
+    !p.fallback_used &&
     p.coordinator_available !== false &&
     p.source_date === dayKey(now, zone) &&
     age >= 0 &&
@@ -145,11 +147,16 @@ export function garmin(states, key, now, zone, cfg) {
     fresh,
     sourceDate: p?.source_date,
     at: p?.fetched_at,
-    reason: !s
-      ? "Not available"
-      : !fresh
-        ? "Older or unverified observation"
-        : "Current source data",
+    reason:
+      !s || value === null
+        ? "Not available"
+        : p?.retained
+          ? "Retained reading"
+          : p?.fallback_used
+            ? "Fallback reading"
+            : !fresh
+              ? "Older or unverified reading"
+              : "",
   };
 }
 export function recovery(g) {
@@ -262,10 +269,65 @@ export function nutrition(data, day, now) {
     rows,
     date,
     at: data?.retrieved_at,
+    ageText: nutritionAge(data?.retrieved_at, now),
     fresh,
     complete: rows.every((r) => r.total !== null && r.target !== null),
     queued: !!data?.refresh_queued,
   };
+}
+export function nutritionAge(at, now) {
+  const minutes = (now - Date.parse(at)) / 60000;
+  if (!Number.isFinite(minutes) || minutes < 0) return "Check time unknown";
+  if (minutes >= 120) return "Data checked >2 hr ago";
+  if (minutes >= 60) return "Data checked >1 hr ago";
+  if (minutes >= 30) return "Data checked >30 min ago";
+  if (minutes > 15) return "Data checked >15 min ago";
+  return "Data checked within 15 min";
+}
+export function taskStatus(entry, now) {
+  if (!entry) return { code: "loading", text: "Loading Todoist tasks…" };
+  if (!entry.ok) {
+    const messages = {
+      timeout:
+        "Todoist task request timed out. Try Refresh. If this continues, check Todoist Enhanced in Home Assistant Settings → Devices & services.",
+      contract:
+        "Todoist Enhanced returned an unsupported response. Check its installed version in Home Assistant Settings → Devices & services.",
+      unavailable:
+        "Todoist Enhanced is unavailable. Check the integration in Home Assistant Settings → Devices & services.",
+      auth: "Task access was denied. Check your Home Assistant session and Todoist Enhanced integration status.",
+    };
+    return {
+      code: entry.error ?? "connection",
+      text:
+        messages[entry.error] ??
+        "Could not load Todoist tasks. Try Refresh. If this continues, check your Home Assistant connection and Todoist Enhanced integration status.",
+    };
+  }
+  if (!Number.isFinite(entry.at) || now < entry.at || now - entry.at >= 600000)
+    return {
+      code: "old",
+      text: "The last task check is over 10 minutes old or its time is unknown. Try Refresh to resume suggestions.",
+    };
+  const t = entry.data;
+  if (t?.stale || t?.metadata?.stale)
+    return {
+      code: "stale",
+      text: "Todoist Enhanced has older task or label data. Try Refresh; if it stays older, check the integration status in Home Assistant Settings → Devices & services.",
+    };
+  if (
+    t?.outcome !== "success" ||
+    t.complete !== true ||
+    t.enrichment_complete !== true ||
+    t.metadata?.complete !== true ||
+    t.metadata?.outcome !== "success" ||
+    t.stale !== false ||
+    t.metadata?.stale !== false
+  )
+    return {
+      code: "incomplete",
+      text: "Todoist task or label data is incomplete. Try Refresh; if it remains incomplete, check Todoist Enhanced in Home Assistant Settings → Devices & services.",
+    };
+  return { code: "ready", text: "Ready" };
 }
 export function weatherWindow(
   forecasts,
@@ -467,7 +529,13 @@ export function rankTasks(tasks, free, context) {
         b.score - a.score || String(a.task.id).localeCompare(String(b.task.id)),
     );
 }
-export function buildModel(hass, cache, cfg, now = Date.now()) {
+export function buildModel(
+  hass,
+  cache,
+  cfg,
+  now = Date.now(),
+  dismissed = new Set(),
+) {
   const zone = hass.config?.time_zone ?? "UTC",
     states = hass.states ?? {},
     b = bounds(now, zone, cfg),
@@ -499,16 +567,11 @@ export function buildModel(hass, cache, cfg, now = Date.now()) {
       ? schedule(cache.calendar.data, start, b.to, zone)
       : { free: [], busy: [], allDay: [], uncertain: false };
   const te = cache.tasks?.data;
-  const taskOk =
-    cache.tasks?.ok &&
-    now - cache.tasks.at < 600000 &&
-    te?.outcome === "success" &&
-    te.complete === true &&
-    te.stale === false &&
-    te.enrichment_complete === true &&
-    te.metadata?.stale === false &&
-    te.metadata?.complete === true &&
-    te.metadata?.outcome === "success";
+  const taskState = taskStatus(cache.tasks, now);
+  const taskOk = taskState.code === "ready";
+  const eligibleTasks = (te?.tasks ?? []).filter(
+    (t) => !dismissed.has(String(t.id)),
+  );
   const forecast =
     cache.weather?.ok && now - cache.weather.at < 7200000
       ? cache.weather.data
@@ -519,7 +582,7 @@ export function buildModel(hass, cache, cfg, now = Date.now()) {
     ? {}
     : (states[cfg.weather]?.attributes ?? {});
   const ranked = taskOk
-    ? rankTasks(te.tasks ?? [], sc.free, {
+    ? rankTasks(eligibleTasks, sc.free, {
         cfg,
         now,
         zone,
@@ -533,7 +596,7 @@ export function buildModel(hass, cache, cfg, now = Date.now()) {
     used = new Set();
   for (const block of sc.free) {
     const candidates = taskOk
-      ? rankTasks(te.tasks ?? [], [block], {
+      ? rankTasks(eligibleTasks, [block], {
           cfg,
           now,
           zone,
@@ -606,6 +669,8 @@ export function buildModel(hass, cache, cfg, now = Date.now()) {
     cal,
     sc,
     taskOk,
+    taskState,
+    dismissedCount: dismissed.size,
     ranked,
     assignments,
     training,
