@@ -39,7 +39,7 @@ Four card types share a controller per HA connection and configuration:
 
 HA state supplies Garmin readings and provenance. Supported forecast service calls supply hourly weather. Authenticated calendar REST reads use a local-day window. Todoist Enhanced supplies tasks and metadata freshness via WebSocket. Nutrition uses the same authenticated HA MCP route already accepted by the source project. Nothing calls an AI model or persists personal snapshots to localStorage.
 
-Diagrams of the pipeline, the recovery verdict and task ranking are in [docs/decision-flow.md](docs/decision-flow.md).
+Diagrams of the pipeline, the recovery verdict and task ranking are in [docs/decision-flow.md](docs/decision-flow.md). A narrative walkthrough of the same rules, including what is deliberately not in the model, is in [docs/decision-logic-handoff.md](docs/decision-logic-handoff.md).
 
 The new view uses native Sections for the outer layout. Four tiles remain two-up on phones; larger screens put the timeline left and actions/signals right. Shared CSS inside our own shadow roots provides styling without `card-mod` or modifying existing cards. Details use native dialogs instead of adding a Bubble dependency to this package. Existing Bubble/ApexCharts cards remain available for later expanded details; neither is required by v0.1.
 
